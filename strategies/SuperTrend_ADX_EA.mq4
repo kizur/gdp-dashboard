@@ -1,41 +1,36 @@
 //+------------------------------------------------------------------+
-//|                                                    SuperTrendADX |
-//|                                      Example Expert Advisor (EA) |
-//|   A SuperTrend based trend-following system with ADX confirmation|
-//|   and ATR-derived stop-loss management.                          |
-//|                                                                  |
-//|   This EA demonstrates how to combine the SuperTrend indicator   |
-//|   with the Average Directional Index (ADX) to reduce lag in      |
-//|   trend-following entries. Stop losses are derived from an ATR   |
-//|   multiple to adapt to current volatility.                       |
-//|                                                                  |
-//|   The code is intentionally verbose and documented so it can     |
-//|   serve as a foundation for further customization.               |
+//|                                              SuperTrend_ADX_EA.mq4|
+//|                         SuperTrend + ADX trend follower (EA)     |
+//|   Trend following entries are driven by a SuperTrend flip and    |
+//|   confirmed by ADX/DI strength. Stop-loss and trailing stop use  |
+//|   ATR-based distances for volatility-aware risk management.      |
 //+------------------------------------------------------------------+
 #property copyright "OpenAI"
 #property link      "https://openai.com"
-#property version   "1.00"
+#property version   "2.00"
 #property strict
 
 input double InpLots               = 0.10;   // Default lot size
-input int    InpSuperTrendPeriod    = 10;     // SuperTrend ATR period
-input double InpSuperTrendMult      = 3.0;    // SuperTrend multiplier
-input int    InpADXPeriod           = 14;     // ADX calculation period
-input double InpADXThreshold        = 20.0;   // Minimum ADX to allow trades
-input int    InpATRPeriodSL         = 14;     // ATR period for stop-loss
-input double InpATRMultiplierSL     = 2.5;    // ATR multiplier for stop-loss
-input bool   InpUseTrailingStop     = true;   // Enable ATR trailing stop
-input double InpTrailingMultiplier  = 1.5;    // ATR multiplier for trailing stop
-input bool   InpAllowNewPositions   = true;   // Allow opening new positions
-input int    InpMagicNumber         = 4242;   // Magic number for trade identification
+input int    InpSuperTrendPeriod   = 10;     // SuperTrend ATR period
+input double InpSuperTrendMult     = 3.0;    // SuperTrend multiplier
+input int    InpADXPeriod          = 14;     // ADX period
+input double InpADXThreshold       = 20.0;   // ADX minimum threshold
+input int    InpATRPeriodSL        = 14;     // ATR period for stop-loss
+input double InpATRMultiplierSL    = 2.5;    // ATR multiplier for stop-loss
+input bool   InpUseTrailingStop    = true;   // Enable trailing stop
+input double InpTrailingMultiplier = 1.5;    // ATR multiplier for trailing stop
+input int    InpSlippage           = 3;      // Max slippage (points)
+input bool   InpAllowNewPositions  = true;   // Allow opening new positions
+input int    InpMagicNumber        = 4242;   // Magic number
 
-//--- internal buffers for SuperTrend calculation
-#define MAX_CALC_BARS 1000
+#define MAX_CALC_BARS 500
+#define ORDER_TYPE_BUY  0
+#define ORDER_TYPE_SELL 1
 
 double   g_upperBand[];
 double   g_lowerBand[];
 double   g_superTrend[];
-int      g_trendDirection[];
+int      g_trendDir[];
 
 datetime g_lastBarTime = 0;
 
@@ -47,21 +42,14 @@ int OnInit()
    ArrayResize(g_upperBand, MAX_CALC_BARS);
    ArrayResize(g_lowerBand, MAX_CALC_BARS);
    ArrayResize(g_superTrend, MAX_CALC_BARS);
-   ArrayResize(g_trendDirection, MAX_CALC_BARS);
+   ArrayResize(g_trendDir, MAX_CALC_BARS);
 
    ArraySetAsSeries(g_upperBand, true);
    ArraySetAsSeries(g_lowerBand, true);
    ArraySetAsSeries(g_superTrend, true);
-   ArraySetAsSeries(g_trendDirection, true);
+   ArraySetAsSeries(g_trendDir, true);
 
    return(INIT_SUCCEEDED);
-  }
-
-//+------------------------------------------------------------------+
-//| Expert deinitialization                                          |
-//+------------------------------------------------------------------+
-void OnDeinit(const int reason)
-  {
   }
 
 //+------------------------------------------------------------------+
@@ -72,17 +60,20 @@ void OnTick()
    if(Bars <= InpSuperTrendPeriod + 5)
       return;
 
-   if(Time[0] == g_lastBarTime)
-      return;
+   bool isNewBar = (Time[0] != g_lastBarTime);
+   if(isNewBar)
+     {
+      g_lastBarTime = Time[0];
+      UpdateSuperTrend();
+      ManageSignals();
+     }
 
-   g_lastBarTime = Time[0];
-
-   UpdateSuperTrend();
-   ManagePositions();
+   if(InpUseTrailingStop)
+      ApplyTrailingStop();
   }
 
 //+------------------------------------------------------------------+
-//| Update SuperTrend buffers                                        |
+//| Calculate SuperTrend values                                      |
 //+------------------------------------------------------------------+
 void UpdateSuperTrend()
   {
@@ -99,7 +90,7 @@ void UpdateSuperTrend()
         {
          g_upperBand[i] = upperBasic;
          g_lowerBand[i] = lowerBasic;
-         g_trendDirection[i] = (Close[i] >= hl2 ? 1 : -1);
+         g_trendDir[i] = (Close[i] >= hl2 ? 1 : -1);
         }
       else
         {
@@ -115,35 +106,33 @@ void UpdateSuperTrend()
          else
             g_lowerBand[i] = lowerBasic;
 
-         if(g_trendDirection[next] == 1)
+         if(g_trendDir[next] == 1)
            {
             if(Close[i] < g_lowerBand[i])
-               g_trendDirection[i] = -1;
+               g_trendDir[i] = -1;
             else
-               g_trendDirection[i] = 1;
-           }
-         else if(g_trendDirection[next] == -1)
-           {
-            if(Close[i] > g_upperBand[i])
-               g_trendDirection[i] = 1;
-            else
-               g_trendDirection[i] = -1;
+               g_trendDir[i] = 1;
            }
          else
-            g_trendDirection[i] = g_trendDirection[next];
+           {
+            if(Close[i] > g_upperBand[i])
+               g_trendDir[i] = 1;
+            else
+               g_trendDir[i] = -1;
+           }
         }
 
-      g_superTrend[i] = (g_trendDirection[i] == 1 ? g_lowerBand[i] : g_upperBand[i]);
+      g_superTrend[i] = (g_trendDir[i] == 1 ? g_lowerBand[i] : g_upperBand[i]);
      }
   }
 
 //+------------------------------------------------------------------+
-//| Manage positions based on current signals                        |
+//| Manage entry/exit signals                                        |
 //+------------------------------------------------------------------+
-void ManagePositions()
+void ManageSignals()
   {
-   int trendDir = g_trendDirection[0];
-   double currentSuperTrend = g_superTrend[0];
+   int trendNow = g_trendDir[0];
+   int trendPrev = g_trendDir[1];
 
    double adxValue = iADX(Symbol(), PERIOD_CURRENT, InpADXPeriod, PRICE_CLOSE, MODE_MAIN, 0);
    double plusDI   = iADX(Symbol(), PERIOD_CURRENT, InpADXPeriod, PRICE_CLOSE, MODE_PLUSDI, 0);
@@ -151,148 +140,130 @@ void ManagePositions()
 
    bool adxStrong = (adxValue >= InpADXThreshold);
 
-   int directionSignal = 0;
-   if(trendDir == 1 && adxStrong && plusDI > minusDI)
-      directionSignal = 1;
-   else if(trendDir == -1 && adxStrong && minusDI > plusDI)
-      directionSignal = -1;
+   int signal = 0;
+   if(trendPrev == -1 && trendNow == 1 && adxStrong && plusDI > minusDI)
+      signal = ORDER_TYPE_BUY;
+   else if(trendPrev == 1 && trendNow == -1 && adxStrong && minusDI > plusDI)
+      signal = ORDER_TYPE_SELL;
 
-   RefreshRates();
-
-   if(directionSignal == 1)
+   if(signal == ORDER_TYPE_BUY)
      {
-      ClosePositions(-1);
+      ClosePositions(OP_SELL);
       if(InpAllowNewPositions)
-         OpenPosition(ORDER_TYPE_BUY, currentSuperTrend);
+         OpenPosition(OP_BUY);
      }
-   else if(directionSignal == -1)
+   else if(signal == ORDER_TYPE_SELL)
      {
-      ClosePositions(1);
+      ClosePositions(OP_BUY);
       if(InpAllowNewPositions)
-         OpenPosition(ORDER_TYPE_SELL, currentSuperTrend);
+         OpenPosition(OP_SELL);
      }
-
-   if(InpUseTrailingStop)
-      ApplyTrailingStop();
   }
 
 //+------------------------------------------------------------------+
-//| Close positions of the specified direction                       |
+//| Open a market position                                           |
 //+------------------------------------------------------------------+
-void ClosePositions(int directionToClose)
+void OpenPosition(int orderType)
+  {
+   if(CountOpenPositions(orderType) > 0)
+      return;
+
+   RefreshRates();
+
+   double lotSize = NormalizeLot(InpLots);
+   if(lotSize <= 0.0)
+      return;
+
+   double atr = iATR(Symbol(), PERIOD_CURRENT, InpATRPeriodSL, 0);
+   double slDistance = atr * InpATRMultiplierSL;
+   double price = (orderType == OP_BUY ? Ask : Bid);
+   double stopLoss = 0.0;
+
+   if(slDistance > 0.0)
+      stopLoss = (orderType == OP_BUY ? price - slDistance : price + slDistance);
+
+   stopLoss = (stopLoss > 0.0 ? NormalizeDouble(stopLoss, Digits) : 0.0);
+
+   int ticket = OrderSend(Symbol(), orderType, lotSize, price, InpSlippage,
+                          stopLoss, 0.0, "SuperTrendADX", InpMagicNumber, 0,
+                          clrDodgerBlue);
+   if(ticket < 0)
+      Print("OrderSend failed: ", GetLastError());
+  }
+
+//+------------------------------------------------------------------+
+//| Close positions of a specific type                               |
+//+------------------------------------------------------------------+
+void ClosePositions(int orderType)
   {
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
          continue;
 
-      if(OrderMagicNumber() != InpMagicNumber || OrderSymbol() != Symbol())
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != InpMagicNumber)
          continue;
 
-      if((directionToClose == 1 && OrderType() == OP_BUY) ||
-         (directionToClose == -1 && OrderType() == OP_SELL) ||
-         (directionToClose == 0))
-        {
-         bool closed = OrderClose(OrderTicket(), OrderLots(),
-                                  (OrderType() == OP_BUY ? Bid : Ask),
-                                  3, clrRed);
-         if(!closed)
-            Print("OrderClose failed: ", GetLastError());
-        }
+      if(OrderType() != orderType)
+         continue;
+
+      bool closed = OrderClose(OrderTicket(), OrderLots(),
+                               (orderType == OP_BUY ? Bid : Ask),
+                               InpSlippage, clrRed);
+      if(!closed)
+         Print("OrderClose failed: ", GetLastError());
      }
   }
 
 //+------------------------------------------------------------------+
-//| Open a new position                                               |
-//+------------------------------------------------------------------+
-void OpenPosition(int orderType, double referencePrice)
-  {
-   // referencePrice is provided for potential custom placement logic.
-   // When positive, it is incorporated into stop placement to keep the
-   // parameter meaningful even for market executions.
-
-   if(CountOpenPositions(orderType) > 0)
-      return;
-
-   double atr = iATR(Symbol(), PERIOD_CURRENT, InpATRPeriodSL, 0);
-   double slDistance = atr * InpATRMultiplierSL;
-
-   double lotSize = NormalizeLot(InpLots);
-   if(lotSize <= 0)
-     {
-      Print("Lot size invalid after normalization.");
-      return;
-     }
-
-   double price = (orderType == ORDER_TYPE_BUY ? Ask : Bid);
-   double anchorPrice = (referencePrice > 0.0 ? referencePrice : price);
-   double stopLoss = (orderType == ORDER_TYPE_BUY ? anchorPrice - slDistance : anchorPrice + slDistance);
-   double takeProfit = 0.0;
-
-   stopLoss = NormalizeDouble(stopLoss, Digits);
-
-   int ticket = OrderSend(Symbol(),
-                          (orderType == ORDER_TYPE_BUY ? OP_BUY : OP_SELL),
-                          lotSize,
-                          price,
-                          3,
-                          stopLoss,
-                          takeProfit,
-                          "SuperTrendADX",
-                          InpMagicNumber,
-                          0,
-                          clrDodgerBlue);
-
-   if(ticket < 0)
-      Print("OrderSend failed with error ", GetLastError());
-  }
-
-//+------------------------------------------------------------------+
-//| Apply trailing stop based on ATR                                  |
+//| Apply ATR trailing stop                                          |
 //+------------------------------------------------------------------+
 void ApplyTrailingStop()
   {
    double atr = iATR(Symbol(), PERIOD_CURRENT, InpATRPeriodSL, 0);
    double trailDistance = atr * InpTrailingMultiplier;
 
+   if(trailDistance <= 0.0)
+      return;
+
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
          continue;
 
-      if(OrderMagicNumber() != InpMagicNumber || OrderSymbol() != Symbol())
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != InpMagicNumber)
          continue;
 
       if(OrderType() == OP_BUY)
         {
          double newSL = Bid - trailDistance;
+         newSL = NormalizeDouble(newSL, Digits);
          if(newSL > OrderStopLoss())
             ModifyOrderStopLoss(newSL);
         }
       else if(OrderType() == OP_SELL)
         {
          double newSL = Ask + trailDistance;
-         if(newSL < OrderStopLoss() || OrderStopLoss() == 0.0)
+         newSL = NormalizeDouble(newSL, Digits);
+         if(OrderStopLoss() == 0.0 || newSL < OrderStopLoss())
             ModifyOrderStopLoss(newSL);
         }
      }
   }
 
 //+------------------------------------------------------------------+
-//| Modify an order's stop loss                                       |
+//| Modify stop loss                                                 |
 //+------------------------------------------------------------------+
 void ModifyOrderStopLoss(double newSL)
   {
-   newSL = NormalizeDouble(newSL, Digits);
-
    bool modified = OrderModify(OrderTicket(), OrderOpenPrice(), newSL,
-                               OrderTakeProfit(), OrderExpiration(), clrYellow);
+                               OrderTakeProfit(), 0, clrYellow);
    if(!modified)
       Print("OrderModify failed: ", GetLastError());
   }
 
 //+------------------------------------------------------------------+
-//| Count open positions in a direction                               |
+//| Count open positions by type                                     |
 //+------------------------------------------------------------------+
 int CountOpenPositions(int orderType)
   {
@@ -302,18 +273,17 @@ int CountOpenPositions(int orderType)
       if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
          continue;
 
-      if(OrderMagicNumber() != InpMagicNumber || OrderSymbol() != Symbol())
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != InpMagicNumber)
          continue;
 
-      if((orderType == ORDER_TYPE_BUY && OrderType() == OP_BUY) ||
-         (orderType == ORDER_TYPE_SELL && OrderType() == OP_SELL))
+      if(OrderType() == orderType)
          count++;
      }
    return(count);
   }
 
 //+------------------------------------------------------------------+
-//| Normalize lot size respecting broker constraints                  |
+//| Normalize lot size                                               |
 //+------------------------------------------------------------------+
 double NormalizeLot(double lots)
   {
@@ -335,10 +305,4 @@ double NormalizeLot(double lots)
 
    return(normalized);
   }
-
-//+------------------------------------------------------------------+
-//| Constants for order type naming (compatibility helper)            |
-//+------------------------------------------------------------------+
-#define ORDER_TYPE_BUY  0
-#define ORDER_TYPE_SELL 1
 //+------------------------------------------------------------------+
