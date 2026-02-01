@@ -208,8 +208,8 @@ void ClosePositions(int directionToClose)
 void OpenPosition(int orderType, double referencePrice)
   {
    // referencePrice is provided for potential custom placement logic.
-   // The default implementation uses current market prices instead.
-   (void)referencePrice;
+   // When positive, it is incorporated into stop placement to keep the
+   // parameter meaningful even for market executions.
 
    if(CountOpenPositions(orderType) > 0)
       return;
@@ -225,7 +225,8 @@ void OpenPosition(int orderType, double referencePrice)
      }
 
    double price = (orderType == ORDER_TYPE_BUY ? Ask : Bid);
-   double stopLoss = (orderType == ORDER_TYPE_BUY ? price - slDistance : price + slDistance);
+   double anchorPrice = (referencePrice > 0.0 ? referencePrice : price);
+   double stopLoss = (orderType == ORDER_TYPE_BUY ? anchorPrice - slDistance : anchorPrice + slDistance);
    double takeProfit = 0.0;
 
    stopLoss = NormalizeDouble(stopLoss, Digits);
